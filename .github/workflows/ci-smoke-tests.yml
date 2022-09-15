@@ -1,6 +1,6 @@
 # This file is automatically added by @npmcli/template-oss. Do not edit.
 
-name: CI - libnpmorg
+name: CI - smoke-tests
 
 on:
   workflow_dispatch:
@@ -8,13 +8,13 @@ on:
     branches:
       - '*'
     paths:
-      - workspaces/libnpmorg/**
+      - smoke-tests/**
   push:
     branches:
       - main
       - latest
     paths:
-      - workspaces/libnpmorg/**
+      - smoke-tests/**
   schedule:
     # "At 09:00 UTC (02:00 PT) on Monday" https://crontab.guru/#0_9_*_*_1
     - cron: "0 9 * * 1"
@@ -33,7 +33,7 @@ jobs:
         with:
           node-version: 16.x
       - run: node . run resetdeps
-      - run: node . run lint -w libnpmorg
+      - run: node . run lint -w smoke-tests
 
   test:
     if: github.repository_owner == 'npm'
@@ -70,4 +70,4 @@ jobs:
       - run: node . run resetdeps
       - name: add tap problem matcher
         run: echo "::add-matcher::.github/matchers/tap.json"
-      - run: node . test --ignore-scripts -w libnpmorg
+      - run: node . test --ignore-scripts -w smoke-tests
