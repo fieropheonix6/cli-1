@@ -1,82 +1,77 @@
-#!/usr/bin/env node
-
 const Arborist = require('@npmcli/arborist')
 const packlist = require('npm-packlist')
-const git = require('@npmcli/git')
-const { resolve, join, relative } = require('path')
+const { join, relative } = require('node:path')
 const localeCompare = require('@isaacs/string-locale-compare')('en')
-const fs = require('fs/promises')
 const PackageJson = require('@npmcli/package-json')
+const { run, CWD, git, fs, pkg: rootPkg, EOL } = require('./util')
+const npmGit = require('@npmcli/git')
 
-const RM_FLAG = '--remove-ignored-files'
-const ALWAYS_IGNORE = `
-.bin/
-.cache/
-package-lock.json
-CHANGELOG*
-changelog*
-ChangeLog*
-Changelog*
-README*
-readme*
-ReadMe*
-Readme*
-__pycache__
-.editorconfig
-.idea/
-.npmignore
-.eslintrc*
-.travis*
-.github
-.jscsrc
-.nycrc
-.istanbul*
-.eslintignore
-.jshintrc*
-.prettierrc*
-.jscs.json
-.dir-locals*
-.coveralls*
-.babelrc*
-.nyc_output
-.gitkeep
-`
+const ALWAYS_IGNORE = [
+  '.bin/',
+  '.cache/',
+  'package-lock.json',
+  'CHANGELOG*',
+  'changelog*',
+  'ChangeLog*',
+  'Changelog*',
+  'README*',
+  'readme*',
+  'ReadMe*',
+  'Readme*',
+  '__pycache__',
+  '.editorconfig',
+  '.idea/',
+  '.npmignore',
+  '.eslintrc*',
+  '.travis*',
+  '.github',
+  '.jscsrc',
+  '.nycrc',
+  '.istanbul*',
+  '.eslintignore',
+  '.jshintrc*',
+  '.prettierrc*',
+  '.jscs.json',
+  '.dir-locals*',
+  '.coveralls*',
+  '.babelrc*',
+  '.nyc_output',
+  '.gitkeep',
+  '*.map',
+  '*.ts',
+  '*.png',
+  '*.jpg',
+]
 
-const lsIgnored = async ({ cwd, dir }) => {
-  const { stdout } = await git.spawn([
+const lsAndRmIgnored = async (dir) => {
+  const files = await git(
     'ls-files',
     '--cached',
     '--ignored',
     `--exclude-standard`,
     dir,
-  ], { cwd })
+    { lines: true }
+  )
 
-  const files = stdout
-    .trim()
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean)
-
-  if (process.argv.includes(RM_FLAG)) {
-    for (const file of files) {
-      await git.spawn(['rm', file], { cwd })
-    }
-    return []
+  for (const file of files) {
+    await git('rm', file, '--force')
   }
 
-  return files
+  // check if there are still ignored files left
+  // if so we will error in the next step
+  const notRemoved = await git(
+    'ls-files',
+    '--cached',
+    '--ignored',
+    `--exclude-standard`,
+    dir,
+    { lines: true }
+  )
+
+  return notRemoved
 }
 
 const getAllowedPaths = (files) => {
-  // Get all files within node_modules and remove
-  // the node_modules/ portion of the path for processing
-  // since this list will go inside a gitignore at the
-  // root of the node_modules dir
-  const nmFiles = files
-    .filter(f => f.startsWith('node_modules/'))
-    .map(f => f.replace(/^node_modules\//, ''))
-    .sort(localeCompare)
-
   class AllowSegments {
     #segments
     #usedSegments
@@ -109,7 +104,7 @@ const getAllowedPaths = (files) => {
       if (use) {
         this.use()
       }
-      // Allow a previously ignored directy
+      // Allow a previously ignored directory
       // Important: this should NOT have a trailing
       // slash if we are not sure it is a directory.
       // Since a dep can be a directory or a symlink and
@@ -175,7 +170,7 @@ const getAllowedPaths = (files) => {
   }
 
   const allowPaths = new Set()
-  for (const file of nmFiles) {
+  for (const file of files) {
     for (const allow of gatherAllows(file.split('/'))) {
       allowPaths.add(allow)
     }
@@ -184,8 +179,8 @@ const getAllowedPaths = (files) => {
   return [...allowPaths]
 }
 
-const setBundleDeps = async (dir) => {
-  const pkg = await PackageJson.load(dir)
+const setBundleDeps = async () => {
+  const pkg = await PackageJson.load(CWD)
 
   pkg.update({
     bundleDependencies: Object.keys(pkg.content.dependencies).sort(localeCompare),
@@ -208,14 +203,23 @@ deps source. We have to do this since everything is ignored by default, and git
 will not allow a nested path if its parent has not also been allowed. BUT! We
 also have to ignore other things in those directories.
 */
-const main = async (path) => {
-  await setBundleDeps(path)
+const main = async () => {
+  await setBundleDeps()
 
-  const nodeModules = resolve(path, 'node_modules')
-  const gitIgnore = join(nodeModules, '.gitignore')
+  const arb = new Arborist({ path: CWD })
+  const allFiles = await arb.loadActual().then(packlist)
+  const workspaceNames = (await rootPkg.mapWorkspaces()).map(p => p.name)
+  const isWorkspace = (p) => workspaceNames.some(w => p.startsWith(w + '/'))
 
-  const arb = new Arborist({ path })
-  const files = await arb.loadActual().then(packlist)
+  // Get all files within node_modules and remove the node_modules/ portion of
+  // the path for processing since this list will go inside a gitignore at the
+  // root of the node_modules dir. It also removes workspaces since those are
+  // symlinks and should not be commited into source control.
+  const files = allFiles
+    .filter(f => f.startsWith('node_modules/'))
+    .map(f => f.replace(/^node_modules\//, ''))
+    .filter(f => !isWorkspace(f))
+    .sort(localeCompare)
 
   const ignoreFile = [
     '# Automatically generated to ignore everything except bundled deps',
@@ -225,31 +229,34 @@ const main = async (path) => {
     '# Allow all bundled deps',
     ...getAllowedPaths(files),
     '# Always ignore some specific patterns within any allowed package',
-    ...ALWAYS_IGNORE.trim().split('\n'),
+    ...ALWAYS_IGNORE,
   ]
 
-  await fs.writeFile(gitIgnore, ignoreFile.join('\n') + '\n')
+  const NODE_MODULES = join(CWD, 'node_modules')
+  const res = await fs.writeFile(join(NODE_MODULES, '.gitignore'), ignoreFile.join(EOL))
+
+  if (!await npmGit.is({ cwd: CWD })) {
+    // if we are not running in a git repo then write the files but we do not
+    // need to run any git commands to check if we have unmatched files in source
+    return res
+  }
 
   // After we write the file we have to check if any of the paths already checked in
   // inside node_modules are now going to be ignored. If we find any then fail with
-  // a list of paths that will need to have `git rm` run on them.
-  const trackedAndIgnored = await lsIgnored({ cwd: path, dir: nodeModules })
+  // a list of the paths remaining. We already attempted to `git rm` them so just
+  // explain what happened and leave the repo in a state to debug.
+  const trackedAndIgnored = await lsAndRmIgnored(NODE_MODULES)
 
   if (trackedAndIgnored.length) {
     const message = [
       'The following files are checked in to git but will now be ignored.',
-      `Rerun this script with \`${RM_FLAG}\` to remove them.`,
-      ...trackedAndIgnored.map(p => relative(nodeModules, p)),
-    ].join('\n')
+      `They could not be removed automatically and will need to be removed manually.`,
+      ...trackedAndIgnored.map(p => relative(NODE_MODULES, p)),
+    ].join(EOL)
     throw new Error(message)
   }
 
-  return `Wrote to ${relative(process.cwd(), gitIgnore)}`
+  return res
 }
 
-main(resolve(__dirname, '..'))
-  .then((res) => console.log(res))
-  .catch((err) => {
-    console.error(err)
-    return process.exit(1)
-  })
+run(main)

@@ -1,21 +1,47 @@
+const releasePleaseConfig = {
+  'release-please-config.json': {
+    file: 'release-please-config-json.hbs',
+    overwrite: false,
+    filter: (p) => p.config.isPublic,
+    parser: (p) => p.JsonMergeNoComment,
+  },
+}
+
 module.exports = {
+  rootModule: {
+    add: {
+      'CONTRIBUTING.md': false,
+      'package.json': { file: 'package-json.hbs', overwrite: false },
+    },
+  },
   rootRepo: {
     add: {
-      '.github/ISSUE_TEMPLATE/config.yml': false,
       '.github/ISSUE_TEMPLATE/bug.yml': false,
-      '.github/workflows/ci.yml': 'ci.yml',
-      '.github/workflows/ci-release.yml': 'ci-release.yml',
+      '.github/ISSUE_TEMPLATE/config.yml': false,
       '.github/dependabot.yml': false,
+      '.github/settings.yml': false,
       '.github/workflows/post-dependabot.yml': false,
-      '.github/workflows/audit.yml': 'audit.yml',
+      '.github/workflows/ci-release.yml': 'ci-release-yml.hbs',
+      '.github/workflows/ci.yml': 'ci-yml.hbs',
+      '.github/workflows/create-node-pr.yml': 'create-node-pr-yml.hbs',
+      '.github/workflows/node-integration.yml': 'node-integration-yml.hbs',
+      ...releasePleaseConfig,
     },
   },
   workspaceRepo: {
     add: {
-      '.github/workflows/release.yml': false,
-      '.github/workflows/ci-release.yml': false,
       '.github/dependabot.yml': false,
+      '.github/settings.yml': false,
+      '.github/workflows/ci-release.yml': false,
       '.github/workflows/post-dependabot.yml': false,
+      '.github/workflows/release.yml': false,
+      '.github/workflows/pull-request.yml': false,
+      ...releasePleaseConfig,
+    },
+  },
+  workspaceModule: {
+    add: {
+      'package.json': { file: 'package-json.hbs', overwrite: false },
     },
   },
   lockfile: true,
@@ -23,19 +49,20 @@ module.exports = {
   defaultBranch: 'latest',
   distPaths: [
     'index.js',
-    'docs/content/**/*.md',
-    'docs/output/**/*.html',
-    'man',
+    'docs/content/',
+    'docs/output/',
+    'man/',
   ],
+  allowDistPaths: false,
   allowPaths: [
+    '/bin/',
+    '/lib/',
     '/node_modules/',
     '/index.js',
-    '/Makefile',
-    '/make.bat',
     '/DEPENDENCIES.md',
+    '/DEPENDENCIES.json',
     '/CONTRIBUTING.md',
     '/configure',
-    '/changelogs/',
     '/AUTHORS',
     '/.mailmap',
     '/.licensee.json',

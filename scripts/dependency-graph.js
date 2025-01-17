@@ -1,34 +1,52 @@
-#!/usr/bin/env node
-
-'use strict'
+const Arborist = require('@npmcli/arborist')
+const os = require('node:os')
+const { readFileSync } = require('node:fs')
+const { join } = require('node:path')
+const { log } = require('proc-log')
+const { run, CWD, pkg, fs, EOL } = require('./util.js')
 
 // Generates our dependency graph documents in DEPENDENCIES.md.
 
-const Arborist = require('@npmcli/arborist')
-const mapWorkspaces = require('@npmcli/map-workspaces')
-const fs = require('fs')
-const log = require('proc-log')
+// To re-create npm-cli-repos.txt run:
+// npx -p @npmcli/stafftools gh repos --json | json -a name | sort > scripts/npm-cli-repos.txt
+const repos = readFileSync(join(CWD, 'scripts', 'npm-cli-repos.txt'), 'utf-8').trim().split(os.EOL)
 
-if (process.argv.includes('--debug')) {
-  process.on('log', console.error)
+// Packages with known circular dependencies.  This is typically something with arborist as a dependency which is also in arborist's dev dependencies.  Not a problem if they're workspaces so we ignore repeats
+const circular = new Set(['@npmcli/mock-registry'])
+
+// TODO Set.intersection/difference was added in node 22.11.0, once we're above that line we can use the builtin
+// https://node.green/#ES2025-features-Set-methods-Set-prototype-intersection--
+function intersection (set1, set2) {
+  const result = new Set()
+  for (const item of set1) {
+    if (set2.has(item)) {
+      result.add(item)
+    }
+  }
+  return result
 }
 
-// To re-create npm-cli-repos.txt run:
-/* eslint-disable-next-line max-len */
-// npx --package=@npmcli/stafftools@latest gh repos --json | json -a name | sort > scripts/npm-cli-repos.txt
-const repos = fs.readFileSync('./scripts/npm-cli-repos.txt', 'utf8').trim().split('\n')
+function difference (set1, set2) {
+  const result = new Set()
+  for (const item of set1) {
+    if (!set2.has(item)) {
+      result.add(item)
+    }
+  }
+  return result
+}
 
 // these have a different package name than the repo name, and are ours.
 const aliases = {
-  semver: 'node-semver',
   abbrev: 'abbrev-js',
+  semver: 'node-semver',
+  which: 'node-which',
 }
 
 // These are entries in npm-cli-repos.txt that correlate to namespaced repos.
 // If we see a bare package with just this name, it's NOT ours
 const namespaced = [
   'arborist',
-  'ci-detect',
   'config',
   'disparity-colors',
   'eslint-config',
@@ -37,6 +55,7 @@ const namespaced = [
   'git',
   'installed-package-contents',
   'lint',
+  'mock-registry',
   'map-workspaces',
   'metavuln-calculator',
   'move-file',
@@ -85,21 +104,17 @@ function stripName (name) {
 
 const main = async function () {
   // add all of the cli's public workspaces as package names
-  const workspaces = await mapWorkspaces({ pkg: require('../package.json') })
-  for (const [key, value] of workspaces.entries()) {
-    if (!require(value + '/package.json').private) {
-      repos.push(key)
+  for (const { name, pkg: ws } of await pkg.mapWorkspaces()) {
+    if (!ws.private) {
+      repos.push(name)
     }
   }
 
-  const arborist = new Arborist({
-    prefix: process.cwd(),
-    path: process.cwd(),
-  })
-  const tree = await arborist.loadVirtual({ path: process.cwd(), name: 'npm' })
+  const arborist = new Arborist({ prefix: CWD, path: CWD })
+  const tree = await arborist.loadVirtual({ path: CWD, name: 'npm' })
   tree.name = 'npm'
 
-  const [annotationsOurs, heirarchyOurs] = walk(tree, true)
+  const [annotationsOurs, hierarchyOurs] = walk(tree, true)
   const [annotationsAll] = walk(tree, false)
 
   const out = [
@@ -117,16 +132,20 @@ const main = async function () {
     ...annotationsAll.sort(),
     '```',
     '',
-    '## npm dependency heirarchy',
+    '## npm dependency hierarchy',
     '',
     'These are the groups of dependencies in npm that depend on each other.',
     'Each group depends on packages lower down the chain, nothing depends on',
     'packages higher up the chain.',
     '',
-    ` - ${heirarchyOurs.reverse().join('\n - ')}`,
+    ` - ${hierarchyOurs.reverse().join(`${EOL} - `)}`,
   ]
-  fs.writeFileSync('DEPENDENCIES.md', out.join('\n'))
-  console.log('wrote to DEPENDENCIES.md')
+
+  fs.writeFile(join(CWD, 'DEPENDENCIES.json'),
+    JSON.stringify(hierarchyOurs.map(v => v.split(', ')), null, 2)
+  )
+
+  return fs.writeFile(join(CWD, 'DEPENDENCIES.md'), out.join(EOL))
 }
 
 const walk = function (tree, onlyOurs) {
@@ -137,7 +156,7 @@ const walk = function (tree, onlyOurs) {
 
   const allDeps = new Set(Object.keys(dependedBy))
   const foundDeps = new Set()
-  const heirarchy = []
+  const hierarchy = []
 
   if (onlyOurs) {
     while (allDeps.size) {
@@ -148,7 +167,11 @@ const walk = function (tree, onlyOurs) {
         log.silly(dep, '::', [...dependedBy[dep]].join(', '))
         log.silly('-'.repeat(80))
 
-        if (!dependedBy[dep].size) {
+        // things that depend on us that are at the same level
+        const both = intersection(allDeps, dependedBy[dep])
+        // ... minus the known circular dependencies
+        const neither = difference(both, circular)
+        if (!dependedBy[dep].size || !neither.size) {
           level.push(dep)
           foundDeps.add(dep)
         }
@@ -171,22 +194,21 @@ const walk = function (tree, onlyOurs) {
         throw new Error(`Would do an infinite loop here, need to debug. ${remaining}`)
       }
 
-      heirarchy.push(level.join(', '))
-      log.silly('HIEARARCHY', heirarchy.length)
+      hierarchy.push(level.join(', '))
+      log.silly('HIERARCHY', hierarchy.length)
       log.silly('='.repeat(80))
     }
   }
 
-  return [annotations, heirarchy]
+  return [annotations, hierarchy]
 }
+
 const iterate = function (node, dependedBy, annotations, onlyOurs) {
   if (!dependedBy[node.packageName]) {
     dependedBy[node.packageName] = new Set()
   }
   for (const [name, edge] of node.edgesOut) {
-    if (
-      (!onlyOurs || isOurs(name)) && !node.dev
-    ) {
+    if ((!onlyOurs || isOurs(name)) && !node.dev) {
       if (!dependedBy[node.packageName].has(edge.name)) {
         dependedBy[node.packageName].add(edge.name)
         annotations.push(`  ${stripName(node.packageName)}-->${escapeName(edge.name)};`)
@@ -198,9 +220,4 @@ const iterate = function (node, dependedBy, annotations, onlyOurs) {
   }
 }
 
-main().then(() => {
-  return process.exit(0)
-}).catch(err => {
-  console.error(err)
-  return process.exit(1)
-})
+run(main)
